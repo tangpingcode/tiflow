@@ -55,10 +55,12 @@ type Capture struct {
 	pdEnpoints      []string
 	UpstreamManager *upstream.Manager
 	ownerMu         sync.Mutex
-	owner           owner.Owner
+	// tpr: 当前实例是 owner 时的状态信息, 如果不是则为 nil.
+	owner owner.Owner
 
 	// session keeps alive between the capture and etcd
-	session  *concurrency.Session
+	session *concurrency.Session
+	// tpr: 选举 owner 工具
 	election *concurrency.Election
 
 	EtcdClient       *etcd.CDCEtcdClient
@@ -206,6 +208,7 @@ func (c *Capture) Run(ctx context.Context) error {
 	// Limit the frequency of reset capture to avoid frequent recreating of resources
 	rl := rate.NewLimiter(0.05, 2)
 	for {
+		// tpr: 前面这段 select 和 error 判断, 是对上一次执行结果的处理, 相当于do-while循环.
 		select {
 		case <-ctx.Done():
 			return nil
@@ -220,10 +223,12 @@ func (c *Capture) Run(ctx context.Context) error {
 			}
 			return errors.Trace(err)
 		}
+		// tpr: 上一次 run 出现可处理的 error, 先重置 capture 然后重新启动
 		err = c.reset(ctx)
 		if err != nil {
 			return errors.Trace(err)
 		}
+		// tpr: 启动执行 capture 并阻塞
 		err = c.run(ctx)
 		// if capture suicided, reset the capture and run again.
 		// if the canceled error throw, there are two possible scenarios:
@@ -247,11 +252,13 @@ func (c *Capture) run(stdCtx context.Context) error {
 		MessageServer:    c.MessageServer,
 		MessageRouter:    c.MessageRouter,
 	})
+	// tpr: 把自己注册到 etcd 上
 	err := c.register(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer func() {
+		// tpr: 退出时清理 etcd 注册信息
 		timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := ctx.GlobalVars().EtcdClient.DeleteCaptureInfo(timeoutCtx, c.info.ID); err != nil {
 			log.Warn("failed to delete capture info when capture exited", zap.Error(err))
@@ -260,6 +267,7 @@ func (c *Capture) run(stdCtx context.Context) error {
 	}()
 	wg := new(sync.WaitGroup)
 	var ownerErr, processorErr, messageServerErr error
+	// tpr: 维护 owner 状态相关处理
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -270,6 +278,7 @@ func (c *Capture) run(stdCtx context.Context) error {
 		ownerErr = c.campaignOwner(ctx)
 		log.Info("the owner routine has exited", zap.Error(ownerErr))
 	}()
+	// tpr: 维护 processor 状态相关处理
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -279,6 +288,7 @@ func (c *Capture) run(stdCtx context.Context) error {
 
 		globalState := orchestrator.NewGlobalState()
 
+		// tpr: 注册当前 capture 实例上下线的回调函数, 用于通知其他 capture 实例 (owner 中也有类似的注册逻辑)
 		globalState.SetOnCaptureAdded(func(captureID model.CaptureID, addr string) {
 			c.MessageRouter.AddPeer(captureID, addr)
 		})
@@ -289,9 +299,11 @@ func (c *Capture) run(stdCtx context.Context) error {
 		// when the etcd worker of processor returns an error, it means that the processor throws an unrecoverable serious errors
 		// (recoverable errors are intercepted in the processor tick)
 		// so we should also stop the processor and let capture restart or exit
+		// tpr: 同 owner 一样, 也启动 EtcdWorker 驱动调度, 但注意传入的 Reactor 对象 以及 Role 不同.
 		processorErr = c.runEtcdWorker(ctx, c.processorManager, globalState, processorFlushInterval, util.RoleProcessor.String())
 		log.Info("the processor routine has exited", zap.Error(processorErr))
 	}()
+	// tpr: 运行 MessageServer (TODO: 作用?)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -356,6 +368,7 @@ func (c *Capture) campaignOwner(ctx cdcContext.Context) error {
 			return cerror.ErrCaptureSuicide.GenWithStackByArgs()
 		}
 
+		// tpr: 走到这里说明当前实例成功选举成为 owner, 做一些状态设置工作
 		ownerRev, err := c.EtcdClient.GetOwnerRevision(ctx, c.info.ID)
 		if err != nil {
 			if errors.Cause(err) == context.Canceled {
@@ -387,7 +400,9 @@ func (c *Capture) campaignOwner(ctx cdcContext.Context) error {
 			c.MessageRouter.RemovePeer(captureID)
 		})
 
+		// tpr: 启动 EtcdWorker 来驱动调度.
 		err = c.runEtcdWorker(ownerCtx, owner, orchestrator.NewGlobalState(), ownerFlushInterval, util.RoleOwner.String())
+		// tpr: 清理本地 owner 状态, 并且在 etcd 上 resign 掉 owner 信息.
 		c.setOwner(nil)
 		log.Info("run owner exited", zap.Error(err))
 		// if owner exits, resign the owner key
@@ -403,6 +418,7 @@ func (c *Capture) campaignOwner(ctx cdcContext.Context) error {
 	}
 }
 
+// tpr: 由 etcd 状态来驱动 reactor 对象的处理逻辑, 包含 owner 和 processor 两种 reactor 实现.
 func (c *Capture) runEtcdWorker(
 	ctx cdcContext.Context,
 	reactor orchestrator.Reactor,

@@ -42,6 +42,7 @@ func Run() {
 	cmd.SetOut(os.Stdout)
 	cmd.SetErr(os.Stderr)
 
+	// tpr: 启动cdc server的命令
 	cmd.AddCommand(server.NewCmdServer())
 	cmd.AddCommand(cli.NewCmdCli())
 	cmd.AddCommand(version.NewCmdVersion())

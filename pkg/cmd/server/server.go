@@ -295,6 +295,7 @@ func NewCmdServer() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// tpr: 这里会调用cdc/server.NewServer()创建cdc server并且执行Run()
 			err = o.run(cmd)
 			cobra.CheckErr(err)
 			return nil

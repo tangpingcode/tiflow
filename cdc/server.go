@@ -152,20 +152,26 @@ func (s *Server) Run(ctx context.Context) error {
 	cdcEtcdClient := etcd.NewCDCEtcdClient(ctx, etcdCli)
 	s.etcdClient = &cdcEtcdClient
 
+	// tpr: 初始化 db sorter 文件路径.
 	err = s.initDir(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
+	// tpr: 初始化 kv worker pool 单例.
 	kv.InitWorkerPool()
 
+	// tpr: 创建 capture 实例
 	s.capture = capture.NewCapture(s.pdEndpoints, s.etcdClient, s.grpcService)
 
+	// tpr: 启动 HTTP 服务并注册所有的接口.
+	// tpr: 主要包括: swagger, status, Open API, pprof, 具体可以看 RegisterRoutes()
 	err = s.startStatusHTTP(s.tcpServer.HTTP1Listener())
 	if err != nil {
 		return err
 	}
 
+	// tpr: 让 server 跑起来, 正常运行时会阻塞.
 	return s.run(ctx)
 }
 
@@ -248,6 +254,8 @@ func (s *Server) run(ctx context.Context) (err error) {
 
 	wg, cctx := errgroup.WithContext(ctx)
 
+	// tpr: 注意以下各个启动项没有先后顺序
+	// tpr: 有任何一项返回 err, 会导致 cctx 的 cancel() 被调用, 进而导致所有项因 cctx.cancel() 退出
 	wg.Go(func() error {
 		return s.capture.Run(cctx)
 	})
