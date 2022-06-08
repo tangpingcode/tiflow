@@ -275,6 +275,8 @@ func (c *Capture) run(stdCtx context.Context) error {
 		// when the campaignOwner returns an error, it means that the owner throws an unrecoverable serious errors
 		// (recoverable errors are intercepted in the owner tick)
 		// so we should also stop the owner and let capture restart or exit
+		// tpr: 感觉这个函数叫 runOwnerLogic() 可能更好一点吧, 因为它不仅在执行选主,
+		// tpr: 一旦选主成功, 还会执行 Owner 角色的业务逻辑 (runEtcdWorker()).
 		ownerErr = c.campaignOwner(ctx)
 		log.Info("the owner routine has exited", zap.Error(ownerErr))
 	}()
@@ -288,7 +290,8 @@ func (c *Capture) run(stdCtx context.Context) error {
 
 		globalState := orchestrator.NewGlobalState()
 
-		// tpr: 注册当前 capture 实例上下线的回调函数, 用于通知其他 capture 实例 (owner 中也有类似的注册逻辑)
+		// tpr: 注册回调函数, 当收到 etcd 变更, 且事件类型为 capture added 时,
+		// tpr: 通过 p2p 通知其他 capture 实例 (owner 中也有类似的注册逻辑)
 		globalState.SetOnCaptureAdded(func(captureID model.CaptureID, addr string) {
 			c.MessageRouter.AddPeer(captureID, addr)
 		})
@@ -303,7 +306,7 @@ func (c *Capture) run(stdCtx context.Context) error {
 		processorErr = c.runEtcdWorker(ctx, c.processorManager, globalState, processorFlushInterval, util.RoleProcessor.String())
 		log.Info("the processor routine has exited", zap.Error(processorErr))
 	}()
-	// tpr: 运行 MessageServer (TODO: 作用?)
+	// tpr: 运行 P2P MessageServer
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

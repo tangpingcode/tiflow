@@ -64,12 +64,17 @@ const (
 // TODO: we need to make Server more unit testable and add more test cases.
 // Especially we need to decouple the HTTPServer out of Server.
 type Server struct {
-	capture      *capture.Capture
-	tcpServer    tcpserver.TCPServer
-	grpcService  *p2p.ServerWrapper
+	// tpr: CDC 核心服务 capture. 注意它是有状态的.
+	capture *capture.Capture
+	// tpr: 所有的对外, 对内服务接口都通过同一个 TCP 端口暴露.
+	tcpServer tcpserver.TCPServer
+	// tpr: 内部通信的 gRPC 接口
+	grpcService *p2p.ServerWrapper
+	// tpr: 对外的 HTTP 接口
 	statusServer *http.Server
-	etcdClient   *etcd.CDCEtcdClient
-	pdEndpoints  []string
+	// tpr: 这个 etcdClient 除了 capture 使用外, 仅在一处向后兼容 sort dir 使用.
+	etcdClient  *etcd.CDCEtcdClient
+	pdEndpoints []string
 }
 
 // NewServer creates a Server instance.
@@ -161,11 +166,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// tpr: 初始化 kv worker pool 单例.
 	kv.InitWorkerPool()
 
-	// tpr: 创建 capture 实例
+	// tpr: 创建 capture 实例.
 	s.capture = capture.NewCapture(s.pdEndpoints, s.etcdClient, s.grpcService)
 
 	// tpr: 启动 HTTP 服务并注册所有的接口.
-	// tpr: 主要包括: swagger, status, Open API, pprof, 具体可以看 RegisterRoutes()
+	// tpr: 主要包括: swagger, status, Open API, pprof, 具体可以看 RegisterRoutes().
 	err = s.startStatusHTTP(s.tcpServer.HTTP1Listener())
 	if err != nil {
 		return err
@@ -234,6 +239,7 @@ func (s *Server) etcdHealthChecker(ctx context.Context) error {
 			for _, pdEndpoint := range s.pdEndpoints {
 				start := time.Now()
 				ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+				// tpr: q: 这里检查的是 pd 的管理端口, 能保证服务端口可用吗?
 				resp, err := httpCli.Get(ctx, fmt.Sprintf("%s/pd/api/v1/health", pdEndpoint))
 				if err != nil {
 					log.Warn("etcd health check error", zap.Error(err))
@@ -254,28 +260,35 @@ func (s *Server) run(ctx context.Context) (err error) {
 
 	wg, cctx := errgroup.WithContext(ctx)
 
-	// tpr: 注意以下各个启动项没有先后顺序
-	// tpr: 有任何一项返回 err, 会导致 cctx 的 cancel() 被调用, 进而导致所有项因 cctx.cancel() 退出
+	// tpr: 注意以下各个启动项没有先后顺序.
+	// tpr: 有任何一项返回 err, 会导致 cctx 的 cancel() 被调用, 进而使所有通过wg.Go()
+	// tpr: 开启的 goroutine 因为 cctx.cancel() 被调用而退出.
 	wg.Go(func() error {
 		return s.capture.Run(cctx)
 	})
 
+	// tpr: etcd 健康检查. 健康检查失败只会打 Warn 日志而不会退出.
 	wg.Go(func() error {
 		return s.etcdHealthChecker(cctx)
 	})
 
+	// tpr: 运行 sorter pool 单例
+	// tpr: IOPool 目前有2个实现
 	wg.Go(func() error {
 		return unified.RunWorkerPool(cctx)
 	})
 
+	// tpr: 运行 kv pool 单例
 	wg.Go(func() error {
 		return kv.RunWorkerPool(cctx)
 	})
 
+	// tpr: tcpServer 中的 cmux 开始提供服务
 	wg.Go(func() error {
 		return s.tcpServer.Run(cctx)
 	})
 
+	// tpr: 如果开启新版 scheduler, 则注册一个 CDCPeerToPeerServer 服务
 	conf := config.GetGlobalServerConfig()
 	if conf.Debug.EnableNewScheduler {
 		grpcServer := grpc.NewServer()
