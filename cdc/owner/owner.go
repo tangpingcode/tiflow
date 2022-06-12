@@ -68,6 +68,7 @@ type ownerJob struct {
 	// for status provider
 	query *Query
 
+	// tpr: job处理过程遇到err通过该chan返回; 处理完成后, 关闭该chan.
 	done chan<- error
 }
 
@@ -391,6 +392,8 @@ func (o *ownerImpl) handleJobs() {
 	for _, job := range jobs {
 		changefeedID := job.ChangefeedID
 		cfReactor, exist := o.changefeeds[changefeedID]
+		// tpr: 如果通过 changefeedID 找不到对应 changefeed 则返回 err 并终止 job.
+		// tpr: q: 什么时候会出现这种情况呢?
 		if !exist && job.Tp != ownerJobTypeQuery {
 			log.Warn("changefeed not found when handle a job", zap.Reflect("job", job))
 			job.done <- cerror.ErrChangeFeedNotExists.FastGenByArgs(job.ChangefeedID)
@@ -398,7 +401,10 @@ func (o *ownerImpl) handleJobs() {
 			continue
 		}
 		switch job.Tp {
+		// tpr: 注意, 有些JobType是永远不会返回 err 到 job.done 中的.
 		case ownerJobTypeAdminJob:
+			// tpr: 这里的 adminJob 被 Push 到 Queue 中之后, 会在 ownerImpl.Tick()
+			// tpr: 后面的 changefeed (也就是cfReactor) 的 Tick() 中, 被Pop出来继续处理.
 			cfReactor.feedStateManager.PushAdminJob(job.AdminJob)
 		case ownerJobTypeScheduleTable:
 			cfReactor.scheduler.MoveTable(job.TableID, job.TargetCaptureID)

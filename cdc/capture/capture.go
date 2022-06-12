@@ -394,6 +394,7 @@ func (c *Capture) campaignOwner(ctx cdcContext.Context) error {
 		owner := c.newOwner(c.UpstreamManager)
 		c.setOwner(owner)
 
+		// tpr: 这个 globalState 设置好之后并没有用到?
 		globalState := orchestrator.NewGlobalState()
 
 		globalState.SetOnCaptureAdded(func(captureID model.CaptureID, addr string) {

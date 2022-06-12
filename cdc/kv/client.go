@@ -521,6 +521,7 @@ func (s *eventFeedSession) eventFeed(ctx context.Context, ts uint64) error {
 		return s.dispatchRequest(ctx)
 	})
 
+	// tpr: 最关键的函数, 启动 regionWorker 拉取 change log.
 	g.Go(func() error {
 		return s.requestRegionToStore(ctx, g)
 	})
